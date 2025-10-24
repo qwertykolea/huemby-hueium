@@ -1,0 +1,78 @@
+name: Patch Emby Server DEB
+
+on:
+  workflow_dispatch:  # Ручной запуск
+  schedule:
+    - cron: '0 2 * * 0'  # Еженедельно по воскресеньям в 2:00 UTC
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'  # Для Emby 4.9.x
+
+    - name: Install tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dpkg wget curl mono-complete  # Для dpkg-deb и ILASM
+
+    - name: Download Emby DEB
+      run: |
+        VERSION="4.9.2.6"
+        wget https://github.com/MediaBrowser/Emby.Releases/releases/download/${VERSION}/emby-server-deb_${VERSION}_amd64.deb -O emby-server.deb
+
+    - name: Extract DEB
+      run: |
+        mkdir extracted
+        dpkg-deb -x emby-server.deb extracted
+        dpkg-deb -e emby-server.deb extracted/DEBIAN
+
+    - name: Patch JS files (e.g., connectionmanager.js)
+      run: |
+        # Найти и заменить URL в JS файлах (на основе ваших скриншотов)
+        find extracted -name "*.js" -path "*/connectionmanager.js" -exec sed -i 's|https://mb3admin.com|https://your-crackemby-domain.workers.dev|g' {} \;
+        # Добавить фиктивный ответ для validateDevice (вставьте ваш Cloudflare JSON)
+        echo 'if (url.includes("validateDevice")) { return {registered: true, expDate: "2099-01-01"}; }' >> extracted/opt/emby-server/system/dashboard-ui/modules/emby-apiclient/connectionmanager.js  # Пример; адаптируйте
+
+    - name: Patch .NET DLL (using dotnet-script for simple IL patch)
+      run: |
+        # Установить dotnet-script для C# скриптинга
+        dotnet tool install -g dotnet-script
+        # Создать скрипт для патчинга PluginSecurityInfo (return true для IsMBSupporter)
+        cat > patch-dll.csx << 'EOF'
+        #r "nuget: Mono.Cecil, 0.11.5"  // Для редактирования DLL
+        using Mono.Cecil;
+        var assembly = AssemblyDefinition.ReadAssembly("extracted/opt/emby-server/system/MediaBrowser.Model.dll");
+        // Найти метод get_IsMBSupporter и заменить тело на return true
+        var method = assembly.MainModule.GetType("MediaBrowser.Model.Entities.PluginSecurityInfo").GetMethod("get_IsMBSupporter");
+        method.Body.Instructions.Clear();
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1));  // true
+        method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        assembly.Write("extracted/opt/emby-server/system/MediaBrowser.Model.dll");
+        EOF
+        dotnet script patch-dll.csx
+        # Аналогично для Emby.Server.Implementations.dll: hasUpdateAvailable -> return false; EnableAutomaticRestart -> false
+
+    - name: Repack DEB
+      run: |
+        dpkg-deb -b extracted emby-server-patched_${{ github.run_number }}_amd64.deb
+
+    - name: Upload patched DEB as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: patched-emby-deb
+        path: emby-server-patched_*.deb
+
+    - name: Optional: Deploy to release (if manual trigger)
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        # Здесь можно добавить gh release create для публикации в вашем репо
+        gh release create v${{ github.run_number }} emby-server-patched_*.deb --repo ${{ github.repository }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
