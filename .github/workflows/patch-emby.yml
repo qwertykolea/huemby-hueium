@@ -1,75 +1,25 @@
-name: Patch Emby Server DEB
+name: Test Emby Patch (Minimal)
 
 on:
-  workflow_dispatch:  # Ручной запуск
-  schedule:
-    - cron: '0 2 * * 0'  # Еженедельно по воскресеньям в 2:00 UTC
+  workflow_dispatch:
 
 jobs:
-  patch:
+  test:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Setup .NET SDK
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'  # Для Emby 4.9.x
-
-    - name: Install tools
+    - name: Check VM startup
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y dpkg wget curl mono-complete
-        dotnet tool install -g dotnet-script --version 1.2.0  # Указываем версию для стабильности
-        export PATH="$PATH:/home/runner/.dotnet/tools"
-        echo "Installed tools: $(which dotnet), $(which dpkg-deb), $(which mono)"
+        echo "VM started: $(date)"
+        uname -a
+        whoami  # runner
 
-    - name: Download Emby DEB
+    - name: Download DEB
       run: |
-        VERSION="4.9.2.6"
-        wget https://github.com/MediaBrowser/Emby.Releases/releases/download/${VERSION}/emby-server-deb_${VERSION}_amd64.deb -O emby-server.deb || { echo "Download failed"; exit 1; }
-        ls -lh emby-server.deb
+        wget https://github.com/MediaBrowser/Emby.Releases/releases/download/4.9.2.6/emby-server-deb_4.9.2.6_amd64.deb -O test.deb
+        ls -lh test.deb || echo "Download failed"
 
-    - name: Extract DEB
-      run: |
-        mkdir extracted
-        dpkg-deb -x emby-server.deb extracted || { echo "Extraction failed"; exit 1; }
-        dpkg-deb -e emby-server.deb extracted/DEBIAN || { echo "Control extraction failed"; exit 1; }
-        ls -R extracted
-
-    - name: Patch JS files (e.g., connectionmanager.js)
-      run: |
-        # Найти и заменить URL в JS файлах
-        find extracted -name "*.js" -path "*/connectionmanager.js" -exec sh -c 'echo "Patching {}"; sed -i "s|https://mb3admin.com|https://your-crackemby-domain.workers.dev|g" "{}" || { echo "Sed failed for {}"; exit 1; }' \; || { echo "JS patch failed"; exit 1; }
-        # Проверка результата
-        grep -r "your-crackemby-domain" extracted
-
-    - name: Patch .NET DLL (simplified with sed as fallback)
-      run: |
-        # Простой патч для IsMBSupporter (замена на return true через IL или текст)
-        find extracted -name "MediaBrowser.Model.dll" -exec sh -c 'echo "Patching {}"; cp "{}" "{}.bak"; mono-csc -out:patch.exe patch.cs && mono patch.exe "{}" || { echo "DLL patch failed"; exit 1; }' \; || { echo "DLL patch failed"; exit 1; }
-        # Альтернатива: временно через sed для текста в IL (если mono-csc недоступен)
-        find extracted -name "MediaBrowser.Model.dll" -exec sh -c 'echo "Fallback patching {}"; strings "{}" | grep -q "get_IsMBSupporter" && sed -i "s/IL_0000:.*ldc.i4.0/IL_0000: ldc.i4.1/" "{}" || echo "No match found"' \;
-
-    - name: Repack DEB
-      run: |
-        dpkg-deb -b extracted emby-server-patched_${{ github.run_number }}_amd64.deb || { echo "Repack failed"; exit 1; }
-        ls -lh emby-server-patched_*.deb
-
-    - name: Upload patched DEB as artifact
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: patched-emby-deb
-        path: emby-server-patched_*.deb
-
-    - name: Optional: Log environment for debugging
-      if: failure()
-      run: |
-        echo "Failed step debug: $(ls -R extracted)"
-        cat extracted/opt/emby-server/system/dashboard-ui/modules/emby-apiclient/connectionmanager.js || echo "JS file not found"
-        strings extracted/opt/emby-server/system/MediaBrowser.Model.dll | grep -i "IsMBSupporter"
-
-# Пример patch.cs для C# патчинга (добавьте в репозиторий)
-# using Mono.Cecil;
-# class Program { static void Main(string[] args) { var asm = AssemblyDefinition.ReadAssembly(args[0]); var method = asm.MainModule.GetType("MediaBrowser.Model.Entities.PluginSecurityInfo").GetMethod("get_IsMBSupporter"); method.Body.Instructions.Clear(); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1)); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); asm.Write(args[0]); } }
+        name: test-deb
+        path: test.deb
